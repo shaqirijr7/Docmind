@@ -7,6 +7,32 @@ const MID = "#4A4869";
 const LIGHT = "#F7F7FC";
 const BORDER = "#E2E2F0";
 
+// ─── PDF TEXT EXTRACTION ──────────────────────────────────────────────────────
+
+async function extractTextFromPDF(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = async (e) => {
+      try {
+        const typedArray = new Uint8Array(e.target.result);
+        const pdfjsLib = window.pdfjsLib;
+        if (!pdfjsLib) { reject(new Error("PDF library not loaded")); return; }
+        pdfjsLib.GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+        const pdf = await pdfjsLib.getDocument({ data: typedArray }).promise;
+        let fullText = "";
+        for (let i = 1; i <= pdf.numPages; i++) {
+          const page = await pdf.getPage(i);
+          const content = await page.getTextContent();
+          fullText += content.items.map((item) => item.str).join(" ") + "\n";
+        }
+        resolve(fullText.trim());
+      } catch (err) { reject(err); }
+    };
+    reader.onerror = () => reject(new Error("Failed to read file"));
+    reader.readAsArrayBuffer(file);
+  });
+}
+
 // ─── NLP UTILITIES ────────────────────────────────────────────────────────────
 
 const STOP_WORDS = new Set([
@@ -18,23 +44,15 @@ const STOP_WORDS = new Set([
   "more","can","all","just","than","then","when","which","who","what","how",
 ]);
 
-function tokenize(text) {
-  return text.toLowerCase().match(/\b[a-z]{3,}\b/g) || [];
-}
+function tokenize(text) { return text.toLowerCase().match(/\b[a-z]{3,}\b/g) || []; }
 
 function sentences(text) {
-  return text
-    .replace(/\n+/g, " ")
-    .split(/(?<=[.!?])\s+/)
-    .map(s => s.trim())
-    .filter(s => s.length > 30);
+  return text.replace(/\n+/g, " ").split(/(?<=[.!?])\s+/).map(s => s.trim()).filter(s => s.length > 30);
 }
 
 function wordFreq(text) {
   const freq = {};
-  tokenize(text).forEach(w => {
-    if (!STOP_WORDS.has(w)) freq[w] = (freq[w] || 0) + 1;
-  });
+  tokenize(text).forEach(w => { if (!STOP_WORDS.has(w)) freq[w] = (freq[w] || 0) + 1; });
   return freq;
 }
 
@@ -49,19 +67,13 @@ function summarizeText(text, numSentences = 4) {
   if (sents.length <= numSentences) return sents.join(" ");
   const freq = wordFreq(text);
   const scored = sents.map((s, i) => ({ s, score: scoresentence(s, freq), i }));
-  const top = scored
-    .sort((a, b) => b.score - a.score)
-    .slice(0, numSentences)
-    .sort((a, b) => a.i - b.i);
+  const top = scored.sort((a, b) => b.score - a.score).slice(0, numSentences).sort((a, b) => a.i - b.i);
   return top.map(t => t.s).join(" ");
 }
 
 function extractKeywords(text, n = 8) {
   const freq = wordFreq(text);
-  return Object.entries(freq)
-    .sort((a, b) => b[1] - a[1])
-    .slice(0, n)
-    .map(([w]) => w);
+  return Object.entries(freq).sort((a, b) => b[1] - a[1]).slice(0, n).map(([w]) => w);
 }
 
 function answerQuestion(question, text) {
@@ -69,70 +81,34 @@ function answerQuestion(question, text) {
   const sents = sentences(text);
   const freq = wordFreq(text);
 
-  // keyword / takeaway questions
   if (q.includes("key") || q.includes("takeaway") || q.includes("main point") || q.includes("important")) {
-    const top = [...sents]
-      .map((s, i) => ({ s, score: scoresentence(s, freq), i }))
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 4)
-      .sort((a, b) => a.i - b.i);
+    const top = [...sents].map((s, i) => ({ s, score: scoresentence(s, freq), i })).sort((a, b) => b.score - a.score).slice(0, 4).sort((a, b) => a.i - b.i);
     return "Key points:\n" + top.map((t, i) => `${i + 1}. ${t.s}`).join("\n");
   }
-
-  // bullet / list request
   if (q.includes("bullet") || q.includes("list") || q.includes("points")) {
-    const top = [...sents]
-      .map((s, i) => ({ s, score: scoresentence(s, freq), i }))
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 5)
-      .sort((a, b) => a.i - b.i);
+    const top = [...sents].map((s, i) => ({ s, score: scoresentence(s, freq), i })).sort((a, b) => b.score - a.score).slice(0, 5).sort((a, b) => a.i - b.i);
     return top.map(t => `• ${t.s}`).join("\n");
   }
-
-  // topic / about questions
   if (q.includes("about") || q.includes("topic") || q.includes("what is") || q.includes("what does")) {
     const keywords = extractKeywords(text, 6);
-    const summary = summarizeText(text, 2);
-    return `This document is about: ${keywords.join(", ")}.\n\n${summary}`;
+    return `This document is about: ${keywords.join(", ")}.\n\n${summarizeText(text, 2)}`;
   }
-
-  // action / recommendation questions
   if (q.includes("action") || q.includes("recommend") || q.includes("suggest") || q.includes("should")) {
-    const actionSents = sents.filter(s =>
-      /should|must|need|recommend|suggest|action|step|improve|consider/i.test(s)
-    );
+    const actionSents = sents.filter(s => /should|must|need|recommend|suggest|action|step|improve|consider/i.test(s));
     if (actionSents.length) return actionSents.slice(0, 3).join("\n\n");
-    return "No explicit action items found. Here's the most relevant section:\n\n" + summarizeText(text, 2);
+    return "No explicit action items found.\n\n" + summarizeText(text, 2);
   }
-
-  // problem / challenge questions
   if (q.includes("problem") || q.includes("challenge") || q.includes("issue") || q.includes("solve")) {
-    const problemSents = sents.filter(s =>
-      /problem|challenge|issue|difficult|fail|lack|limit|risk|concern/i.test(s)
-    );
+    const problemSents = sents.filter(s => /problem|challenge|issue|difficult|fail|lack|limit|risk|concern/i.test(s));
     if (problemSents.length) return problemSents.slice(0, 3).join("\n\n");
-    return "No explicit problems found. Here's a summary:\n\n" + summarizeText(text, 2);
+    return "No explicit problems found.\n\n" + summarizeText(text, 2);
   }
-
-  // keyword-based search
   const qWords = tokenize(q).filter(w => !STOP_WORDS.has(w));
   if (qWords.length) {
-    const matches = sents
-      .map(s => {
-        const sl = s.toLowerCase();
-        const hits = qWords.filter(w => sl.includes(w)).length;
-        return { s, hits };
-      })
-      .filter(m => m.hits > 0)
-      .sort((a, b) => b.hits - a.hits)
-      .slice(0, 3);
-
-    if (matches.length) {
-      return "Most relevant sections:\n\n" + matches.map(m => m.s).join("\n\n");
-    }
+    const matches = sents.map(s => { const sl = s.toLowerCase(); const hits = qWords.filter(w => sl.includes(w)).length; return { s, hits }; }).filter(m => m.hits > 0).sort((a, b) => b.hits - a.hits).slice(0, 3);
+    if (matches.length) return "Most relevant sections:\n\n" + matches.map(m => m.s).join("\n\n");
   }
-
-  return "I couldn't find a direct answer in the document. Here's the summary:\n\n" + summarizeText(text, 3);
+  return "I couldn't find a direct answer. Here's the summary:\n\n" + summarizeText(text, 3);
 }
 
 // ─── STYLES ───────────────────────────────────────────────────────────────────
@@ -142,7 +118,7 @@ const S = {
   nav: { padding: "18px 28px", display: "flex", alignItems: "center", justifyContent: "space-between", borderBottom: `1px solid ${BORDER}`, background: "#fff" },
   logo: { fontWeight: 800, fontSize: 20, letterSpacing: "-0.5px", color: DARK, display: "flex", alignItems: "center", gap: 8 },
   logoAccent: { color: ACCENT },
-  freeBadge: { background: "#E6FAF0", color: "#1A8A50", fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 20, letterSpacing: "0.4px" },
+  freeBadge: { background: "#E6FAF0", color: "#1A8A50", fontSize: 11, fontWeight: 700, padding: "3px 10px", borderRadius: 20 },
   main: { flex: 1, maxWidth: 760, margin: "0 auto", width: "100%", padding: "40px 20px", display: "flex", flexDirection: "column", gap: 24 },
   hero: { textAlign: "center", marginBottom: 4 },
   h1: { fontSize: 32, fontWeight: 800, letterSpacing: "-0.8px", lineHeight: 1.2, margin: "0 0 10px" },
@@ -157,7 +133,7 @@ const S = {
   line: { flex: 1, height: 1, background: BORDER },
   textarea: { width: "100%", minHeight: 130, padding: 14, borderRadius: 12, border: `1px solid ${BORDER}`, fontFamily: "inherit", fontSize: 14, color: DARK, resize: "vertical", background: "#fff", outline: "none", lineHeight: 1.7, boxSizing: "border-box" },
   row: { display: "flex", gap: 10, flexWrap: "wrap" },
-  btn: (primary, disabled) => ({ padding: "10px 22px", borderRadius: 10, fontWeight: 700, fontSize: 14, cursor: disabled ? "not-allowed" : "pointer", border: primary ? "none" : `1px solid ${BORDER}`, background: primary ? (disabled ? "#C5C4E8" : ACCENT) : "#fff", color: primary ? "#fff" : disabled ? "#bbb" : DARK, flex: primary ? 1 : "none", opacity: disabled ? 0.7 : 1, transition: "all 0.15s" }),
+  btn: (primary, disabled) => ({ padding: "10px 22px", borderRadius: 10, fontWeight: 700, fontSize: 14, cursor: disabled ? "not-allowed" : "pointer", border: primary ? "none" : `1px solid ${BORDER}`, background: primary ? (disabled ? "#C5C4E8" : ACCENT) : "#fff", color: primary ? "#fff" : disabled ? "#bbb" : DARK, flex: primary ? 1 : "none", opacity: disabled ? 0.7 : 1 }),
   card: { background: "#fff", border: `1px solid ${BORDER}`, borderRadius: 14, padding: 20 },
   cardHeader: { display: "flex", alignItems: "center", gap: 8, marginBottom: 14, paddingBottom: 12, borderBottom: `1px solid ${BORDER}` },
   cardTitle: { fontWeight: 700, fontSize: 15, margin: 0 },
@@ -174,6 +150,7 @@ const S = {
   stats: { display: "flex", gap: 16, marginTop: 6, flexWrap: "wrap" },
   stat: { fontSize: 12, color: MID },
   statVal: { fontWeight: 700, color: DARK },
+  errorMsg: { background: "#FFF0F0", border: "1px solid #FFD6D6", borderRadius: 10, padding: "12px 16px", color: "#C0392B", fontSize: 13 },
 };
 
 const SUGGESTED = [
@@ -192,14 +169,35 @@ export default function DocMind() {
   const [question, setQuestion] = useState("");
   const [dragging, setDragging] = useState(false);
   const [processing, setProcessing] = useState(false);
+  const [error, setError] = useState("");
   const fileRef = useRef();
   const chatEnd = useRef();
 
-  const handleFile = (file) => {
+  const handleFile = async (file) => {
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (e) => { setText(e.target.result); setFileName(file.name); setSummary(""); setChat([]); setKeywords([]); };
-    reader.readAsText(file);
+    setError("");
+    setSummary(""); setChat([]); setKeywords([]);
+    setFileName(file.name);
+
+    if (file.type === "application/pdf" || file.name.endsWith(".pdf")) {
+      setProcessing(true);
+      try {
+        const extracted = await extractTextFromPDF(file);
+        if (!extracted || extracted.length < 50) {
+          setError("Could not extract text from this PDF. It may be scanned or image-based.");
+        } else {
+          setText(extracted);
+        }
+      } catch (e) {
+        setError("Failed to read PDF. Please try a different file.");
+      } finally {
+        setProcessing(false);
+      }
+    } else {
+      const reader = new FileReader();
+      reader.onload = (e) => setText(e.target.result);
+      reader.readAsText(file);
+    }
   };
 
   const handleDrop = useCallback((e) => {
@@ -234,6 +232,7 @@ export default function DocMind() {
 
   return (
     <div style={S.root}>
+      <script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js" />
       <style>{`textarea:focus,input:focus{border-color:${ACCENT}!important;box-shadow:0 0 0 3px ${ACCENT_SOFT}} button:hover:not(:disabled){filter:brightness(0.93)}`}</style>
 
       <nav style={S.nav}>
@@ -248,23 +247,18 @@ export default function DocMind() {
           <span style={S.freeNote}>🔒 Works offline · No API key · No sign-up</span>
         </div>
 
-        {/* Drop zone */}
         <div style={S.dropzone(dragging)} onDragOver={(e) => { e.preventDefault(); setDragging(true); }} onDragLeave={() => setDragging(false)} onDrop={handleDrop} onClick={() => fileRef.current.click()}>
-          <input ref={fileRef} type="file" accept=".txt,.md,.csv,.json" style={S.fileInput} onChange={(e) => handleFile(e.target.files[0])} onClick={(e) => e.stopPropagation()} />
-          <span style={S.dropIcon}>📄</span>
-          <div style={S.dropTitle}>{fileName ? `✓ ${fileName}` : "Drop a file here"}</div>
-          <div style={S.dropSub}>Supports .txt · .md · .csv · .json</div>
+          <input ref={fileRef} type="file" accept=".txt,.md,.csv,.json,.pdf" style={S.fileInput} onChange={(e) => handleFile(e.target.files[0])} onClick={(e) => e.stopPropagation()} />
+          <span style={S.dropIcon}>{processing ? "⏳" : "📄"}</span>
+          <div style={S.dropTitle}>{processing ? "Reading PDF..." : fileName ? `✓ ${fileName}` : "Drop a file here"}</div>
+          <div style={S.dropSub}>Supports .pdf · .txt · .md · .csv · .json</div>
         </div>
+
+        {error && <div style={S.errorMsg}>⚠️ {error}</div>}
 
         <div style={S.divider}><div style={S.line} /><span>or paste text</span><div style={S.line} /></div>
 
-        <textarea
-          style={S.textarea}
-          placeholder="Paste your document, article, essay, report or any text here…"
-          value={text}
-          onChange={(e) => { setText(e.target.value); setSummary(""); setChat([]); setKeywords([]); }}
-          rows={6}
-        />
+        <textarea style={S.textarea} placeholder="Paste your document, article, essay, report or any text here…" value={text} onChange={(e) => { setText(e.target.value); setSummary(""); setChat([]); setKeywords([]); }} rows={6} />
 
         {wordCount > 0 && (
           <div style={S.stats}>
@@ -278,57 +272,32 @@ export default function DocMind() {
           <button style={S.btn(true, !hasDoc || processing)} disabled={!hasDoc || processing} onClick={doSummarize}>
             {processing ? "⏳ Processing…" : "✨ Summarize"}
           </button>
-          <button style={S.btn(false, !hasDoc)} disabled={!hasDoc} onClick={() => { setText(""); setFileName(""); setSummary(""); setChat([]); setKeywords([]); }}>
+          <button style={S.btn(false, !hasDoc)} disabled={!hasDoc} onClick={() => { setText(""); setFileName(""); setSummary(""); setChat([]); setKeywords([]); setError(""); }}>
             Clear
           </button>
         </div>
 
-        {/* Summary */}
         {summary && (
           <div style={S.card}>
             <div style={S.cardHeader}><span>📝</span><h3 style={S.cardTitle}>Summary</h3></div>
             <p style={S.summaryText}>{summary}</p>
-            {keywords.length > 0 && (
-              <div style={S.keywords}>
-                {keywords.map(k => <span key={k} style={S.kw}>{k}</span>)}
-              </div>
-            )}
+            {keywords.length > 0 && <div style={S.keywords}>{keywords.map(k => <span key={k} style={S.kw}>{k}</span>)}</div>}
           </div>
         )}
 
-        {/* Q&A */}
         {summary && (
           <div style={S.card}>
             <div style={S.cardHeader}><span>💬</span><h3 style={S.cardTitle}>Ask about this document</h3></div>
-
-            {chat.length === 0 && (
-              <div style={S.tips}>
-                {SUGGESTED.map(q => (
-                  <button key={q} style={S.tip} onClick={() => doAsk(q)}>{q}</button>
-                ))}
-              </div>
-            )}
-
+            {chat.length === 0 && <div style={S.tips}>{SUGGESTED.map(q => <button key={q} style={S.tip} onClick={() => doAsk(q)}>{q}</button>)}</div>}
             {chat.length > 0 && (
               <div style={S.chatList}>
-                {chat.map((m, i) => (
-                  <div key={i} style={S.bubble(m.role === "user")}>{m.text}</div>
-                ))}
+                {chat.map((m, i) => <div key={i} style={S.bubble(m.role === "user")}>{m.text}</div>)}
                 <div ref={chatEnd} />
               </div>
             )}
-
             <div style={S.inputRow}>
-              <input
-                style={S.chatInput}
-                placeholder="Ask a question about the document…"
-                value={question}
-                onChange={(e) => setQuestion(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && doAsk()}
-              />
-              <button style={S.sendBtn(!question.trim())} disabled={!question.trim()} onClick={() => doAsk()}>
-                Send
-              </button>
+              <input style={S.chatInput} placeholder="Ask a question…" value={question} onChange={(e) => setQuestion(e.target.value)} onKeyDown={(e) => e.key === "Enter" && doAsk()} />
+              <button style={S.sendBtn(!question.trim())} disabled={!question.trim()} onClick={() => doAsk()}>Send</button>
             </div>
           </div>
         )}
